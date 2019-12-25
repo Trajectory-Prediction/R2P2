@@ -39,7 +39,7 @@ def main(args):
 
     # Configure model based on the selected option:
     if args.model_type == 'R2P2_RNN':
-        model = R2P2_RNN(agent_encoder=__agent_encoder, static_encoder=__static_encoder, dynamic_generator=__dynamic_generator)
+        model = R2P2_RNN(scene_encoder=__scene_encoder, static_encoder=__static_encoder, dynamic_generator=__dynamic_generator)
     else:
         raise ValueError("Unknown model type {:s}.".format(args.model_type))
 

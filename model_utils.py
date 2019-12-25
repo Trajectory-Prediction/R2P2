@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 
+import pdb
+
 class R2P2_CNN(nn.Module):
   def __init__(self, in_channels=3):
     super(R2P2_CNN, self).__init__()
@@ -100,7 +102,7 @@ class R2P2_Static(nn.Module):
     # Flatten the scene encdoing then
     # concat with the motion encoding
     scene_vec = scene.reshape((-1, 6*50*50))
-    motion_scene = torch.cat((motion_encoding, scene_vec))
+    motion_scene = torch.cat((motion_encoding, scene_vec), dim=1)
 
     # 2-layer MLP
     static = self.mlp(motion_scene)
@@ -154,7 +156,7 @@ class R2P2_Dynamic(nn.Module):
       dynamic_encoding, h = self.gru(x_flat, h)
       dynamic_encoding = dynamic_encoding[-1] # Need the last one
       # Concat the dynamic and static encodings
-      dynamic_static = torch.cat((dynamic_encoding, static))
+      dynamic_static = torch.cat((dynamic_encoding, static), dim=1)
 
       # 2-layer MLP
       output = self.mlp(dynamic_static)
@@ -185,6 +187,6 @@ class R2P2_Dynamic(nn.Module):
     sigma = torch.stack(sigma) # sigma: 30 X B X 2 X 2
 
     # Transpose x
-    x = x.transpose(-1, -2) # x: 30 X B X 2
+    x = x.transpose(1, 0) # x: 30 X B X 2
 
     return mu, sigma, x
