@@ -8,17 +8,76 @@ import torch.nn.functional as F
 
 import pdb
 
+# EPS = 1e-9
+
+# def bilinear_interpolation_1d(prediction, prior):
+    
+#     # Change to map CS
+#     prediction_mapCS = prediction * 2.0 + 112.0
+#     prediction_mapCS = prediction_mapCS.transpose(0, 1)
+
+#     x = prediction_mapCS[:, :, 0].reshape(-1)
+#     y = prediction_mapCS[:, :, 1].reshape(-1)
+
+#     # Filter out-of-range coordinates
+#     x_out_left = x < 0
+#     x_out_right = x > 223
+#     y_out_left = y < 0
+#     y_out_right = y > 223
+
+#     out_mask = x_out_left | x_out_right | y_out_left | y_out_right
+#     in_mask = torch.logical_not(out_mask)
+
+#     x[out_mask] = 0.0
+#     y[out_mask] = 0.0
+
+#     # Detect batch_size
+#     batch_size = prior.size(0)
+#     batch_mask = []
+#     for i in range(batch_size):
+#         batch_mask.extend([i] * 30)
+#     batch_mask = torch.LongTensor(batch_mask)
+
+#     # Qunatize x and y
+#     x1 = torch.floor(x)
+#     x2 = torch.ceil(x)
+#     y1 = torch.floor(y)
+#     y2 = torch.ceil(y)
+
+#     x1_int = x1.long()
+#     x2_int = x2.long()
+#     y1_int = y1.long()
+#     y2_int = y2.long()
+
+#     q11 = prior[batch_mask, y1_int, x1_int]
+#     q12 = prior[batch_mask, y1_int, x2_int]
+#     q21 = prior[batch_mask, y2_int, x1_int]
+#     q22 = prior[batch_mask, y2_int, x2_int]
+    
+#     result = (q11 * ((x2 - x) * (y2 - y)) +
+#               q21 * ((x - x1) * (y2 - y)) +
+#               q12 * ((x2 - x) * (y - y1)) +
+#               q22 * ((x - x1) * (y - y1))
+#             )
+    
+#     # Assign 0 prob. to out masks
+#     result[out_mask] = EPS
+#     result[result < EPS] = EPS
+
+#     return result
+
 def print_out(string, file_front):
     print(string)
     print(string, file=file_front)
 
 class ModelTrainer:
-    def __init__(self, model, train_loader, valid_loader,
+    def __init__(self, model, train_loader, valid_loader, criterion,
                  optimizer, exp_path, text_logger, logger,
                  device, load_ckpt=None):
         self.model = model
         self.train_loader = train_loader
         self.valid_loader = valid_loader
+        self.criterion = criterion
         self.optimizer = optimizer
         self.scheduler = ReduceLROnPlateau(self.optimizer, factor=(1/2), verbose=True, patience=3)
         self.exp_path = exp_path
@@ -82,9 +141,12 @@ class ModelTrainer:
         epoch_ade, epoch_fde = 0.0, 0.0
         epoch_agents = 0.0
         for b, batch in enumerate(self.train_loader):
-            print("Working on batch {:d}/{:d}".format(b+1, len(self.train_loader)), end='\r')
+            print("Working on batch {:d}/{:d}".format(b+1, len(self.train_loader)), end='\r')        
             self.optimizer.zero_grad()
-            src_trajs, src_lens, tgt_trajs, tgt_lens, decode_start_vel, decode_start_pos, decode_start_pos_city, scene_images, prior, scene_id = batch
+            src_trajs, src_lens, tgt_trajs, tgt_lens, decode_start_vel, decode_start_pos, decode_start_pos_city, scene_images, scene_id = batch
+
+            # Detect dynamic batch size
+            batch_size = scene_images.size(0)
 
             scene_images = scene_images.to(self.device, non_blocking=True)
             src_trajs = src_trajs.to(self.device, non_blocking=True)
@@ -93,275 +155,119 @@ class ModelTrainer:
             decode_start_vel = decode_start_vel.to(self.device, non_blocking=True)
             decode_start_pos = decode_start_pos.to(self.device, non_blocking=True)
 
-            mu, sigma, gen_trajs = self.model(src_trajs, src_lens, decode_start_vel, decode_start_pos, scene_images)
+            # Generate latent state z
+            z = torch.normal(mean=0.0, std=1.0, size=(30, batch_size, 2)).to(self.device)
+            # Initial GRU state
+            h_0 = torch.zeros((1, batch_size, 150)).to(self.device)
 
-            pdb.set_trace()
+            gen_trajs, mu, sigma  = self.model(z, h_0, src_trajs, src_lens, decode_start_vel, decode_start_pos, scene_images)
 
-            # Normalizing Flow
+            # Prior Loss (p loss)
+            ploss = self.criterion(gen_trajs, tgt_trajs)
+            ploss = ploss.mean()
 
-            # Loss
-            batch_loss = self.criterion(predicted_trajs, tgt_trajs)
-            batch_loss = batch_loss.reshape((-1, 2))
-            batch_loss = batch_loss[all_agent_time_index]
-            batch_loss /= torch.unsqueeze(time_normalizer, dim=1)
-            batch_loss = batch_loss.sum()/(len(tgt_lens) * 2.0)
+            # Normalizing Flow (q loss)
+            gen_trajs_bt = gen_trajs.reshape((-1, 2))
+            mu_bt = mu.reshape((-1, 2))
 
-            with torch.no_grad():
-                error = predicted_trajs - tgt_trajs
-                sq_error = (error ** 2).sum(2).sqrt()
-                sq_error = sq_error.reshape((-1))
+            traj_mu = (gen_trajs_bt - mu_bt).unsqueeze(2)
+            sigma_bt = sigma.reshape((-1, 2, 2))
 
-                # ADE
-                batch_ade = sq_error[all_agent_time_index]
-                batch_ade /= time_normalizer
-                batch_ade = batch_ade.sum()
+            z_, _ = torch.solve(traj_mu, sigma_bt)
 
-                # FDE
-                batch_fde = sq_error[all_agent_final_time_index]
-                batch_fde = batch_fde.sum()
+            # TODO
+            # batch_loss = q_loss + p_loss
 
-            batch_loss.backward()
-            self.optimizer.step()
+            # with torch.no_grad():
+            #     error = predicted_trajs - tgt_trajs
+            #     sq_error = (error ** 2).sum(2).sqrt()
+            #     sq_error = sq_error.reshape((-1))
 
-            epoch_loss += batch_loss.item()
-            epoch_ade += batch_ade.item()
-            epoch_fde += batch_fde.item()
-            epoch_agents += len(tgt_lens)
+            #     # ADE
+            #     batch_ade = batch_ade.mean()
 
-        epoch_loss /= (b+1)
-        epoch_ade /= epoch_agents
-        epoch_fde /= epoch_agents
+            #     # FDE
+            #     batch_fde = batch_fde.mean()
+
+            # batch_loss.backward()
+            # self.optimizer.step()
+
+            # epoch_loss += batch_loss.item()
+            # epoch_ade += batch_ade.item()
+            # epoch_fde += batch_fde.item()
+            # epoch_agents += len(tgt_lens)
+
+        # epoch_loss /= (b+1)
+        # epoch_ade /= epoch_agents
+        # epoch_fde /= epoch_agents
         return epoch_loss, epoch_ade, epoch_fde
 
-    def train_gan_single_epoch(self, epoch):
-        """Trains the model for a single round."""
+    # TODO
+    # Implement visualization in inference function
+    # Write inference code based on the train_single_eopch
+    # Be advised that call self.model.eval() before inference
+    # And wrap the inference codes under with torch.no_grad()
+    # Otherwise memory will explode.
 
-        self.model.train()
-        epoch_g_loss, epoch_d_loss = 0.0, 0.0
-        epoch_ade, epoch_fde = 0.0, 0.0
-        epoch_agents = 0.0
-
-        for i, e in enumerate(self.gan_weight_schedule):
-            if epoch <= e:
-                gan_weight = self.gan_weight[i]
-                break
-
-        for b, batch in enumerate(self.train_loader):
-            self.optimizer.zero_grad()
-            self.optimizer_D.zero_grad()
-
-            print("Working on batch {:d}/{:d}".format(b+1, len(self.train_loader)), end='\r')
-            scene_images, agent_masks, num_src_trajs, src_trajs, src_lens, unsorter, num_tgt_trajs, tgt_trajs, tgt_lens, encode_coords, decode_rel_pos, decode_start_pos = batch
-
-            scene_images = scene_images.to(self.device, non_blocking=True)
-            src_trajs = src_trajs.to(self.device, non_blocking=True)
-            src_lens = src_lens.to(self.device, non_blocking=True)
-            tgt_trajs = tgt_trajs.to(self.device, non_blocking=True)
-            decode_rel_pos = decode_rel_pos.to(self.device, non_blocking=True)
-            decode_start_pos = decode_start_pos.to(self.device, non_blocking=True)
-
-            predicted_trajs = self.model(src_trajs, src_lens, unsorter, agent_masks,
-                                        decode_rel_pos[agent_masks], decode_start_pos[agent_masks],
-                                        self.stochastic, encode_coords, scene_images)
-
-            # src_trajs, src_lens are sorted by len
-            unsorted_src_trajs = src_trajs[unsorter]
-            unsorted_src_lens = src_lens[unsorter]
-
-            tgt_idx = 0
-            total_len = []
-            true_trajs, fake_trajs = [], []
-            # true_trajs are [past + future labels] and fake_trajs are [past + future predicitons]
-
-            for i, mask in enumerate(agent_masks):
-                past_len = unsorted_src_lens[i]
-                past = unsorted_src_trajs[i, :past_len, :]  # [seq_len X 2]
-
-                if mask: # decode
-                    future_len = tgt_lens[tgt_idx]
-                    real = tgt_trajs[tgt_idx][:future_len]
-                    fake = predicted_trajs[tgt_idx][:future_len]
-
-                    total_len.append(past_len + future_len)
-                    true_trajs.append(torch.cat((past, real), axis=0))
-                    fake_trajs.append(torch.cat((past, fake), axis=0))
-                    tgt_idx+=1
-
-                else: # not decode
-                    total_len.append(past_len)
-                    true_trajs.append(past)
-                    fake_trajs.append(past)
-
-            total_len = torch.stack(total_len)
-            true_trajs = np.array(true_trajs)
-            fake_trajs = np.array(fake_trajs)
-
-            # padding
-            MAX_OBSV_LEN = 20
-            MAX_PRED_LEN = 30
-            MAX_ALL_LEN = MAX_OBSV_LEN + MAX_PRED_LEN
-
-            padded_true_trajs = []
-            padded_fake_trajs = []
-            for true_traj, fake_traj in zip(true_trajs, fake_trajs):
-                obsv_len = true_traj.shape[0]
-                obsv_pad = MAX_ALL_LEN - obsv_len
-
-                if obsv_pad > 0:
-                    true_traj = F.pad(input=true_traj, pad=(0, 0, 0, obsv_pad), mode='constant', value=0)
-                    fake_traj = F.pad(input=fake_traj, pad=(0, 0, 0, obsv_pad), mode='constant', value=0)
-                    padded_true_trajs.append(true_traj)
-                    padded_fake_trajs.append(fake_traj)
-                else:
-                    padded_true_trajs.append(true_traj)
-                    padded_fake_trajs.append(fake_traj)
-
-            padded_true_trajs = torch.stack(padded_true_trajs)  # [num_agents X MAX_ALL_LEN X 2]
-            padded_fake_trajs = torch.stack(padded_fake_trajs)
-
-            # sorter
-            all_sorter = torch.argsort(total_len, descending=True)
-            sorted_padded_true_trajs = padded_true_trajs[all_sorter]
-            sorted_padded_fake_trajs = padded_fake_trajs[all_sorter]
-            total_len = total_len[all_sorter]
-            all_unsorter = torch.argsort(all_sorter)
-            all_agent_masks = torch.ones_like(agent_masks)
-
-            true_score = self.discriminator(sorted_padded_true_trajs, total_len, all_unsorter, all_agent_masks,
-                                            None, None, None, encode_coords, scene_images)  # [num_agents X 1]
-
-            fake_score = self.discriminator(sorted_padded_fake_trajs, total_len, all_unsorter, all_agent_masks,
-                                            None, None, None, encode_coords, scene_images)  # [num_agents X 1]
-
-            # Train Generator (i.e. MATF decoder)
-            self.model.require_grad = True
-            self.discriminator.require_grad = False
-
-            # Calculate the sample indices
-            with torch.no_grad():
-                time_normalizer = []
-                all_agent_time_index, all_agent_final_time_index = [], []
-
-                for i, tgt_len in enumerate(tgt_lens):
-                    idx_i = np.arange(tgt_len) + i*30
-                    normalizer_i = torch.ones(tgt_len) * tgt_len
-                    time_normalizer.append(normalizer_i)
-                    all_agent_time_index.append(idx_i)
-                    all_agent_final_time_index.append(idx_i[-1])
-
-                time_normalizer = torch.cat(time_normalizer).to(self.device)
-                all_agent_time_index = np.concatenate(all_agent_time_index)
-
-            batch_regression_loss = self.criterion(predicted_trajs, tgt_trajs)
-            batch_regression_loss = batch_regression_loss.reshape((-1, 2))
-            batch_regression_loss = batch_regression_loss[all_agent_time_index]
-            batch_regression_loss /= torch.unsqueeze(time_normalizer, dim=1)
-            batch_regression_loss = batch_regression_loss.sum()/(len(tgt_lens) * 2.0)
-
-            with torch.no_grad():
-                error = predicted_trajs - tgt_trajs
-                sq_error = (error ** 2).sum(2).sqrt()
-                sq_error = sq_error.reshape((-1))
-
-                # ADE
-                batch_ade = sq_error[all_agent_time_index]
-                batch_ade /= time_normalizer
-                batch_ade = batch_ade.sum()
-
-                # FDE
-                batch_fde = sq_error[all_agent_final_time_index]
-                batch_fde = batch_fde.sum()
-
-            batch_adversarial_loss = self.adversarial_loss(fake_score, torch.ones_like(fake_score))
-            batch_g_loss = batch_regression_loss + (batch_adversarial_loss * gan_weight)
-
-            batch_g_loss.backward(retain_graph=True)
-            self.optimizer.step()
-
-            # Train Discriminator
-            self.discriminator.require_grad = True
-            self.model.require_grad = False
-
-            real_loss = self.adversarial_loss(true_score, torch.ones_like(true_score))
-            fake_loss = self.adversarial_loss(fake_score, torch.zeros_like(fake_score))
-            batch_d_loss = gan_weight*(real_loss + fake_loss)
-
-            batch_d_loss.backward()
-            self.optimizer_D.step()
-
-            epoch_g_loss += batch_g_loss.item()
-            epoch_d_loss += batch_d_loss.item()
-            epoch_ade += batch_ade
-            epoch_fde += batch_fde
-            epoch_agents += len(tgt_lens)
-            torch.cuda.empty_cache()
-
-        epoch_g_loss /= (b+1)
-        epoch_d_loss /= (b+1)
-        epoch_ade /= epoch_agents
-        epoch_fde /= epoch_agents
-
-        return epoch_g_loss, epoch_d_loss, epoch_ade, epoch_fde
-
-    def inference(self):
-        self.model.eval()  # Set model to evaluate mode.
+    # def inference(self):
+    #     self.model.eval()  # Set model to evaluate mode.
         
-        with torch.no_grad():
-            epoch_ade, epoch_fde = 0.0, 0.0
-            epoch_agents = 0.0
+    #     with torch.no_grad():
+    #         epoch_ade, epoch_fde = 0.0, 0.0
+    #         epoch_agents = 0.0
 
-            for b, batch in enumerate(self.valid_loader):
-                scene_images, agent_masks, num_src_trajs, src_trajs, src_lens, unsorter, num_tgt_trajs, tgt_trajs, tgt_lens, encode_coords, decode_rel_pos, decode_start_pos = batch
-                scene_images = scene_images.to(self.device, non_blocking=True)
-                src_trajs = src_trajs.to(self.device, non_blocking=True)
-                src_lens = src_lens.to(self.device, non_blocking=True)
-                tgt_trajs = tgt_trajs.to(self.device, non_blocking=True)
-                decode_rel_pos = decode_rel_pos.to(self.device, non_blocking=True)
-                decode_start_pos = decode_start_pos.to(self.device, non_blocking=True)
+    #         for b, batch in enumerate(self.valid_loader):
+    #             scene_images, agent_masks, num_src_trajs, src_trajs, src_lens, unsorter, num_tgt_trajs, tgt_trajs, tgt_lens, encode_coords, decode_rel_pos, decode_start_pos = batch
+    #             scene_images = scene_images.to(self.device, non_blocking=True)
+    #             src_trajs = src_trajs.to(self.device, non_blocking=True)
+    #             src_lens = src_lens.to(self.device, non_blocking=True)
+    #             tgt_trajs = tgt_trajs.to(self.device, non_blocking=True)
+    #             decode_rel_pos = decode_rel_pos.to(self.device, non_blocking=True)
+    #             decode_start_pos = decode_start_pos.to(self.device, non_blocking=True)
 
-                # Prediction
-                predicted_trajs = self.model(src_trajs, src_lens, unsorter, agent_masks,
-                                            decode_rel_pos[agent_masks], decode_start_pos[agent_masks],
-                                            self.stochastic, encode_coords, scene_images)
+    #             # Prediction
+    #             predicted_trajs = self.model(src_trajs, src_lens, unsorter, agent_masks,
+    #                                         decode_rel_pos[agent_masks], decode_start_pos[agent_masks],
+    #                                         self.stochastic, encode_coords, scene_images)
 
-                # Calculate the sample indices
-                time_normalizer = []
-                all_agent_time_index = []
-                all_agent_final_time_index = []
+    #             # Calculate the sample indices
+    #             time_normalizer = []
+    #             all_agent_time_index = []
+    #             all_agent_final_time_index = []
 
-                for i, tgt_len in enumerate(tgt_lens):
-                    idx_i = np.arange(tgt_len) + i*30
-                    normalizer_i = torch.ones(tgt_len) * tgt_len
-                    time_normalizer.append(normalizer_i)
-                    all_agent_time_index.append(idx_i)
-                    all_agent_final_time_index.append(idx_i[-1])
+    #             for i, tgt_len in enumerate(tgt_lens):
+    #                 idx_i = np.arange(tgt_len) + i*30
+    #                 normalizer_i = torch.ones(tgt_len) * tgt_len
+    #                 time_normalizer.append(normalizer_i)
+    #                 all_agent_time_index.append(idx_i)
+    #                 all_agent_final_time_index.append(idx_i[-1])
 
-                time_normalizer = torch.cat(time_normalizer).to(self.device)
-                all_agent_time_index = np.concatenate(all_agent_time_index)
+    #             time_normalizer = torch.cat(time_normalizer).to(self.device)
+    #             all_agent_time_index = np.concatenate(all_agent_time_index)
 
-                error = predicted_trajs - tgt_trajs
-                sq_error = (error ** 2).sum(2).sqrt()
-                sq_error = sq_error.reshape((-1))
+    #             error = predicted_trajs - tgt_trajs
+    #             sq_error = (error ** 2).sum(2).sqrt()
+    #             sq_error = sq_error.reshape((-1))
 
-                # ADE
-                batch_ade = sq_error[all_agent_time_index]
-                batch_ade /= time_normalizer
-                batch_ade = batch_ade.sum()
+    #             # ADE
+    #             batch_ade = sq_error[all_agent_time_index]
+    #             batch_ade /= time_normalizer
+    #             batch_ade = batch_ade.sum()
 
-                # FDE
-                batch_fde = sq_error[all_agent_final_time_index]
-                batch_fde = batch_fde.sum()
+    #             # FDE
+    #             batch_fde = sq_error[all_agent_final_time_index]
+    #             batch_fde = batch_fde.sum()
 
-                epoch_ade += batch_ade.item()
-                epoch_fde += batch_fde.item()
-                epoch_agents += len(tgt_lens)
+    #             epoch_ade += batch_ade.item()
+    #             epoch_fde += batch_fde.item()
+    #             epoch_agents += len(tgt_lens)
 
-            epoch_ade /= epoch_agents
-            epoch_fde /= epoch_agents
+    #         epoch_ade /= epoch_agents
+    #         epoch_fde /= epoch_agents
 
-        scheduler_metric = (epoch_ade + epoch_fde) / 2.0
+    #     scheduler_metric = (epoch_ade + epoch_fde) / 2.0
 
-        return epoch_ade, epoch_fde, scheduler_metric
+    #     return epoch_ade, epoch_fde, scheduler_metric
 
     def get_lr(self):
         """Returns Learning Rate of the Optimizer."""

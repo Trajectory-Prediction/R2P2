@@ -50,13 +50,10 @@ class ArgoverseDataset(Dataset):
         self.testset = testset
         self.img_transform = transforms.Compose([transforms.Resize((64, 64)),
                                                  transforms.ToTensor(),
-                                                 transforms.Normalize([127.5, 127.5, 127.5],
-                                                                      [51.0, 51.0, 51.0])]
+                                                 transforms.Normalize([0.5, 0.5, 0.5],
+                                                                      [0.2, 0.2, 0.2])]
                                                 )
-        self.prior_transform = transforms.Compose([transforms.ToTensor(),
-                                                   transforms.Lambda(lambda img: (img > 0).float()),
-                                                   transforms.Lambda(lambda img: img / img.sum())]
-                                                   )
+
         self.num_workers = num_workers
       
         # Extract Data:
@@ -80,15 +77,14 @@ class ArgoverseDataset(Dataset):
         scene_id = self.scene_id[idx]
 
         map_image = Image.open(self.scene_map_paths[idx])
-        prior = self.prior_transform(map_image)
         map_image = self.img_transform(map_image)
 
         if self.testset:
-          episode = (past_agents_traj, past_agents_traj_len, decode_start_vel, decode_start_pos, decode_start_pos_city, map_image, prior, scene_id)
+          episode = (past_agents_traj, past_agents_traj_len, decode_start_vel, decode_start_pos, decode_start_pos_city, map_image, scene_id)
         else:
           future_agents_traj = self.future_agents_traj_list[idx]
           future_agents_traj_len = self.future_agents_traj_len_list[idx]
-          episode = (past_agents_traj, past_agents_traj_len, future_agents_traj, future_agents_traj_len, decode_start_vel, decode_start_pos, decode_start_pos_city, map_image, prior, scene_id)
+          episode = (past_agents_traj, past_agents_traj_len, future_agents_traj, future_agents_traj_len, decode_start_vel, decode_start_pos, decode_start_pos_city, map_image, scene_id)
 
         return episode
 

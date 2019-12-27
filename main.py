@@ -6,9 +6,9 @@ import torch
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-from models import R2P2_RNN
+from models import R2P2_CNN, R2P2_RNN
 from dataset import ArgoverseDataset
-from model_utils import R2P2_CNN, R2P2_Static, R2P2_Dynamic
+from model_utils import ContextEncoder, DynamicDecoder
 from utils import ModelTrainer
 
 
@@ -33,13 +33,12 @@ def main(args):
 
     print(f'Train Examples: {len(train_dataset)} | Valid Examples: {len(valid_dataset)}')
 
-    __scene_encoder = R2P2_CNN(in_channels=3)
-    __static_encoder = R2P2_Static()
-    __dynamic_generator = R2P2_Dynamic()
+    __context_encoder = ContextEncoder()
+    __dynamic_decoder = DynamicDecoder()
 
     # Configure model based on the selected option:
     if args.model_type == 'R2P2_RNN':
-        model = R2P2_RNN(scene_encoder=__scene_encoder, static_encoder=__static_encoder, dynamic_generator=__dynamic_generator)
+        model = R2P2_RNN(context_encoder=__context_encoder, dynamic_decoder=__dynamic_decoder)
     else:
         raise ValueError("Unknown model type {:s}.".format(args.model_type))
 
@@ -47,6 +46,11 @@ def main(args):
     model = model.to(device)
     # if args.gpu_devices:
     #     model = nn.DataParallel(model, device_ids=eval(args.gpu_devices))
+
+    if args.criterion == 'mseloss':
+        criterion = torch.nn.MSELoss(reduction='none')
+
+    criterion = criterion.to(device)
 
     if args.optimizer == 'adam':
         optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate,
@@ -57,7 +61,7 @@ def main(args):
 
     output_log = open(exp_path + '/output_log.txt', 'w')
 
-    trainer = ModelTrainer(model, train_loader, valid_loader, optimizer,
+    trainer = ModelTrainer(model, train_loader, valid_loader, criterion, optimizer,
                            exp_path, output_log, logger, device, args.load_ckpt)
 
     trainer.train(args.num_epochs)
@@ -87,6 +91,7 @@ if __name__ == "__main__":
     
     
     # Training Parameters
+    parser.add_argument('--criterion', type=str, default='mseloss', help="Training Criterion")
     parser.add_argument('--optimizer', type=str, default='adam', help="Optimizer")
     parser.add_argument('--num_epochs', type=int, default=100, help="Number of epochs for training the model")
     parser.add_argument('--num_workers', type=int, default=24, help="")
