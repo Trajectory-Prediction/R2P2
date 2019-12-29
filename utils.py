@@ -66,6 +66,17 @@ import pdb
 
 #     return result
 
+def ADE(predicted_traj, future_traj):
+    return ((predicted_traj - future_traj)**2).sum(2).sqrt().mean()
+
+
+def FDE(predicted_traj, future_traj):
+    # Only the last coords
+    return ((predicted_traj[-1] - future_traj[-1])**2).sum().sqrt()
+
+
+
+
 def print_out(string, file_front):
     print(string)
     print(string, file=file_front)
@@ -95,7 +106,6 @@ class ModelTrainer:
 
     def train(self, num_epochs):
         print_out('TRAINING .....', self.text_logger)
-
         for epoch in tqdm(range(self.start_epoch, self.start_epoch + num_epochs)):
             print_out("==========================================================================================", self.text_logger)
 
@@ -135,7 +145,7 @@ class ModelTrainer:
 
     def train_single_epoch(self):
         """Trains the model for a single round."""
-
+        
         self.model.train()
         epoch_loss = 0.0
         epoch_ade, epoch_fde = 0.0, 0.0
@@ -164,7 +174,8 @@ class ModelTrainer:
 
             # Prior Loss (p loss)
             ploss = self.criterion(gen_trajs, tgt_trajs)
-            ploss = ploss.mean()
+            # ploss = ploss.mean()
+            ploss = ploss.reshape((-1, 2))
 
             # Normalizing Flow (q loss)
             gen_trajs_bt = gen_trajs.reshape((-1, 2))
@@ -174,10 +185,43 @@ class ModelTrainer:
             sigma_bt = sigma.reshape((-1, 2, 2))
 
             z_, _ = torch.solve(traj_mu, sigma_bt)
+            
+            from scipy.stats import multivariate_normal
+            q0 = multivariate_normal(mean=[0,0], cov=[[1,0],[0,1]])   
+            q0_pt = q0.pdf(z_.cpu().detach())
+            q0_pt = torch.FloatTensor(q0_pt)
+            
+            q_phi = q0_pt.to(self.device) / (torch.det(sigma_bt)).unsqueeze(1)
+            
+            # batch_loss = 0.0
+            batch_ade, batch_fde = 0.0, 0.0
 
-            # TODO
             # batch_loss = q_loss + p_loss
+            batch_loss = ( -torch.log(q_phi) - torch.log(ploss) ).mean()
+            with torch.no_grad():
 
+                # ADE
+                batch_ade += ADE(gen_trajs, tgt_trajs)
+                # FDE
+                batch_fde += FDE(gen_trajs, tgt_trajs)
+
+                # batch_ade = batch_ade.mean()
+                # batch_fde = batch_fde.mean()
+            pdb.set_trace()
+            batch_loss.backward()
+        
+            self.optimizer.step()
+
+            epoch_loss += batch_loss.item()
+            epoch_ade += batch_ade.item()
+            epoch_fde += batch_fde.item()
+            epoch_agents += len(tgt_lens)
+
+        epoch_loss /= (b+1)
+        epoch_ade /= epoch_agents
+        epoch_fde /= epoch_agents
+
+        
             # with torch.no_grad():
             #     error = predicted_trajs - tgt_trajs
             #     sq_error = (error ** 2).sum(2).sqrt()
