@@ -1,3 +1,5 @@
+import time
+
 import torch
 import torch.nn as nn
 
@@ -99,39 +101,73 @@ class DynamicDecoder(nn.Module):
         h = h_0
         dx = init_velocity
         x_prev = init_position
+
+        grutime = 0.0
+        mlptime = 0.0
+        exptime = 0.0
+        transformtime = 0.0
+
         for i in range(30):
           # Flattend previous states as input
           x_flat = x.reshape((1, batch_size, 30*2))
+
+          start_time = time.time()
+
           # Unroll a step
           dynamic_encoding, h = self.gru(x_flat, h)
           dynamic_encoding = dynamic_encoding[-1] # Need the last one
+
+          grutime += time.time() - start_time
+
+          start_time = time.time()
+
           # Concat the dynamic and static encodings
           dynamic_static = torch.cat((dynamic_encoding, static), dim=1)
-
           # 2-layer MLP
           output = self.mlp(dynamic_static)
           mu_hat = output[:, :2] # [B X 2]
           sigma_hat = output[:, 2:].reshape((batch_size, 2, 2)) # [B X 2 X 2]
 
+          mlptime += time.time() - start_time
+
           # verlet integration
           mu_ = x_prev + dx + mu_hat
           mu.append(mu_)
 
-          # matrix exponential
-          sigma_sym = sigma_hat + sigma_hat.transpose(-2, -1) # Make a symmetric
-          e, v = torch.symeig(sigma_sym, eigenvectors=True)
-          vt = v.transpose(-2, -1)
-          e = e.unsqueeze(1) # e: [B X 1 X 2], v: [B X 2 X 2]
+          
 
-          sigma_ = torch.matmul(v * torch.exp(e), vt)
+          # matrix exponential
+          # sigma_sym = sigma_hat + sigma_hat.transpose(-2, -1) # Make a symmetric
+          
+          # start_time = time.time()
+          # pdb.set_trace()
+          # e, v = torch.symeig(sigma_sym, eigenvectors=True)
+
+          # exptime += time.time() - start_time
+
+          # vt = v.transpose(-2, -1)
+          # e = e.unsqueeze(1) # e: [B X 1 X 2], v: [B X 2 X 2]
+
+          # sigma_ = torch.matmul(v * torch.exp(e), vt)
+          # sigma.append(sigma_)
+
+          # p.d. sigma enforcement
+          sigma_ = torch.matmul(sigma_hat, sigma_hat.transpose(-2, -1)) + 1e-5 * torch.eye(2, device=device)
           sigma.append(sigma_)
+
+          start_time = time.time()
 
           # Transform z to x
           x_ = torch.matmul(sigma_, z[i].unsqueeze(2)).squeeze(2) + mu_
+          x = x.clone()
           x[:, i, :] = x_
           dx = x_ - x_prev
           x_prev = x_
       
+          transformtime = time.time() - start_time
+        
+        # print(grutime, mlptime, exptime, transformtime)
+
         # Stack mu's and sigma's as tensors
         mu = torch.stack(mu, dim=1) # mu:  B X 30 X 2
         sigma = torch.stack(sigma, dim=1) # sigma: B X 30 X 2 X 2
