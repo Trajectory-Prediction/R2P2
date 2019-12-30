@@ -9,8 +9,6 @@ import torch
 from torchvision import transforms
 from torch.utils.data.dataset import Dataset
 
-import pdb
-
 class ParallelSim(object):
     def __init__(self, processes):
         self.pool = mp.Pool(processes=processes)
@@ -19,7 +17,6 @@ class ParallelSim(object):
         self.results = []
 
     def add(self, func, args):
-        print(args)
         self.pool.apply_async(func=func, args=args, callback=self.complete)
         self.total_processes += 1
 
@@ -111,21 +108,19 @@ class ArgoverseDataset(Dataset):
             sub_directory = root_dir + sub_directory + '/'
             path_lists.extend(self.extract_directory(sub_directory))
 
-        # if self.num_workers:
-        #     num_processes = self.num_workers
-        # else:
-        #     num_processes = mp.cpu_count()
+        if self.num_workers:
+            num_processes = self.num_workers
+        else:
+            num_processes = mp.cpu_count()
 
-        # runner = ParallelSim(processes=num_processes)
+        runner = ParallelSim(processes=num_processes)
 
-        results = []
         for path_list in path_lists:
-            results.append(self.extract_trajectory_multicore(path_list))
-            # runner.add(self.extract_trajectory_multicore, (path_list, ))
+            runner.add(self.extract_trajectory_multicore, (path_list, ))
 
-        # runner.run()
-        # results = runner.get_results()
-
+        runner.run()
+        results = runner.get_results()
+        
         if save_cache_dir is not None:
             with open(save_cache_dir, 'wb') as f:
                 pickle.dump(results, f) 
@@ -156,7 +151,6 @@ class ArgoverseDataset(Dataset):
         return path_lists
 
     def extract_trajectory_multicore(self, path_list):
-        print(path_list, end='\r')
         directory, scene_segment, reference_frame = path_list
         observation_path = directory + scene_segment + '/observation/' + reference_frame
         map_path = directory + scene_segment + '/map/v{:s}/'.format(self.map_version) + reference_frame.replace('pkl', 'png')

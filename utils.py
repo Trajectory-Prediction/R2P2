@@ -9,64 +9,6 @@ import torch.nn.functional as F
 
 import pdb
 
-# EPS = 1e-9
-
-# def bilinear_interpolation_1d(prediction, prior):
-    
-#     # Change to map CS
-#     prediction_mapCS = prediction * 2.0 + 112.0
-#     prediction_mapCS = prediction_mapCS.transpose(0, 1)
-
-#     x = prediction_mapCS[:, :, 0].reshape(-1)
-#     y = prediction_mapCS[:, :, 1].reshape(-1)
-
-#     # Filter out-of-range coordinates
-#     x_out_left = x < 0
-#     x_out_right = x > 223
-#     y_out_left = y < 0
-#     y_out_right = y > 223
-
-#     out_mask = x_out_left | x_out_right | y_out_left | y_out_right
-#     in_mask = torch.logical_not(out_mask)
-
-#     x[out_mask] = 0.0
-#     y[out_mask] = 0.0
-
-#     # Detect batch_size
-#     batch_size = prior.size(0)
-#     batch_mask = []
-#     for i in range(batch_size):
-#         batch_mask.extend([i] * 30)
-#     batch_mask = torch.LongTensor(batch_mask)
-
-#     # Qunatize x and y
-#     x1 = torch.floor(x)
-#     x2 = torch.ceil(x)
-#     y1 = torch.floor(y)
-#     y2 = torch.ceil(y)
-
-#     x1_int = x1.long()
-#     x2_int = x2.long()
-#     y1_int = y1.long()
-#     y2_int = y2.long()
-
-#     q11 = prior[batch_mask, y1_int, x1_int]
-#     q12 = prior[batch_mask, y1_int, x2_int]
-#     q21 = prior[batch_mask, y2_int, x1_int]
-#     q22 = prior[batch_mask, y2_int, x2_int]
-    
-#     result = (q11 * ((x2 - x) * (y2 - y)) +
-#               q21 * ((x - x1) * (y2 - y)) +
-#               q12 * ((x2 - x) * (y - y1)) +
-#               q22 * ((x - x1) * (y - y1))
-#             )
-    
-#     # Assign 0 prob. to out masks
-#     result[out_mask] = EPS
-#     result[result < EPS] = EPS
-
-#     return result
-
 def ADE(predicted_traj, future_traj):
     # predicted_traj : [B X T X 2]
     # future_traj : [B X T X 2]
@@ -208,11 +150,6 @@ class ModelTrainer:
             batch_loss.backward()
 
             self.optimizer.step()
-
-            # if b == 100:
-            #     pdb.set_trace()
-
-            # print("datatime: {:.2f}, gentime: {:.2f}, nftime: {:.2f}, bptime: {:.2f}".format(datatime, gentime, nftime, bptime))
             with torch.no_grad():
                 # Loss
                 batch_qloss = -log_qpi.mean().item()
@@ -238,13 +175,6 @@ class ModelTrainer:
         epoch_fde /= epoch_agents
 
         return epoch_loss, epoch_ade, epoch_fde
-
-    # TODO
-    # Implement visualization in inference function
-    # Write inference code based on the train_single_eopch
-    # Be advised that call self.model.eval() before inference
-    # And wrap the inference codes under with torch.no_grad()
-    # Otherwise memory will explode.
 
     def inference(self):
         self.model.eval()  # Set model to evaluate mode.
