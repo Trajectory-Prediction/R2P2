@@ -68,11 +68,18 @@ import pdb
 #     return result
 
 def ADE(predicted_traj, future_traj):
-    return ((predicted_traj - future_traj)**2).sum(2).sqrt().mean()
+    # predicted_traj : [B X T X 2]
+    # future_traj : [B X T X 2]
+    # Average over the time
+    error = predicted_traj - future_traj
+    return (error**2).sum(2).sqrt().mean(1)
 
 def FDE(predicted_traj, future_traj):
-    # Only the last coords
-    return ((predicted_traj[-1] - future_traj[-1])**2).sum().sqrt()
+    # predicted_traj : [B X T X 2]
+    # future_traj : [B X T X 2]
+    # Only the last time
+    error = predicted_traj[:, -1, :] - future_traj[:, -1, :]
+    return (error**2).sum(1).sqrt()
 
 def print_out(string, file_front):
     print(string)
@@ -92,6 +99,7 @@ class ModelTrainer:
         self.text_logger = text_logger
         self.logger = logger
         self.device = device
+        self.beta = 1.0
 
         if load_ckpt:
             self.load_checkpoint(load_ckpt)
@@ -149,10 +157,7 @@ class ModelTrainer:
         epoch_ade, epoch_fde = 0.0, 0.0
         epoch_agents = 0.0
 
-        datatime_start = time.time()
-
         for b, batch in enumerate(self.train_loader):
-            print("Working on batch {:d}/{:d}".format(b+1, len(self.train_loader)), end='\r')
             self.optimizer.zero_grad()
             src_trajs, src_lens, tgt_trajs, tgt_lens, decode_start_vel, decode_start_pos, decode_start_pos_city, scene_images, scene_id = batch
 
@@ -166,31 +171,25 @@ class ModelTrainer:
             decode_start_vel = decode_start_vel.to(self.device, non_blocking=True)
             decode_start_pos = decode_start_pos.to(self.device, non_blocking=True)
 
-            datatime = time.time() - datatime_start
-
-            gentime_start = time.time()
-
             # Generate latent state z
-            z = torch.normal(mean=0.0, std=1.0, size=(30, batch_size, 2)).to(self.device)
+            z = torch.normal(mean=0.0, std=1.0, size=(batch_size, 30*2)).to(self.device)
             # Initial GRU state
-            h_0 = torch.zeros((1, batch_size, 150)).to(self.device)
+            h_0 = torch.zeros((batch_size, 150)).to(self.device)
 
             gen_trajs, mu, sigma  = self.model(z, h_0, src_trajs, src_lens, decode_start_vel, decode_start_pos, scene_images)
-
-            gentime = time.time() - gentime_start
 
             # Prior Loss (p loss)
             ploss = self.criterion(gen_trajs, tgt_trajs)
             ploss = ploss.sum(dim=2) # [32 X 30]
             ploss = ploss.mean(dim=1) # [32]
 
-            nftime_start = time.time()
-
             # Normalizing Flow (q loss)
-            gen_trajs_bt = gen_trajs.reshape((-1, 2)) # 960 X 2
+            tgt_trajs_bt = tgt_trajs.reshape((-1, 2)) # 960 X 2
             mu_bt = mu.reshape((-1, 2)) # 960 X 2
 
-            traj_mu = (gen_trajs_bt - mu_bt).unsqueeze(2) # 960 X 2 X 1
+            perterb_traj_bt = torch.normal(mean=0.0, std=0.001, size=tgt_trajs_bt.shape).to(self.device)
+
+            traj_mu = (tgt_trajs_bt - mu_bt - perterb_traj_bt).unsqueeze(2) # 960 X 2 X 1
             sigma_bt = sigma.reshape((-1, 2, 2)) # 960 X 2 X 2
 
             z_, _ = torch.solve(traj_mu, sigma_bt) # [960 X 2 X 1]
@@ -203,37 +202,36 @@ class ModelTrainer:
             det_sigma = torch.det(sigma_bt).reshape((batch_size, -1)) # [32 * 30]
 
             log_qpi = log_q0 - torch.log(det_sigma).sum(dim=1) # [32]
+            
 
-            pdb.set_trace()
-
-            nftime = time.time() - nftime_start
-
-            bptime_start = time.time()
-
-            batch_loss = (-log_qpi + 0.0001 * ploss).mean()
+            batch_loss = (-log_qpi + self.beta * ploss).mean()
             batch_loss.backward()
 
             self.optimizer.step()
 
-            bptime = time.time() - bptime_start
+            # if b == 100:
+            #     pdb.set_trace()
 
             # print("datatime: {:.2f}, gentime: {:.2f}, nftime: {:.2f}, bptime: {:.2f}".format(datatime, gentime, nftime, bptime))
-            print("qloss: ", -log_qpi.mean().item(), "ploss: ", ploss.mean().item())
             with torch.no_grad():
+                # Loss
+                batch_qloss = -log_qpi.mean().item()
+                batch_ploss = ploss.mean().item()
+
                 # ADE
                 batch_ade = ADE(gen_trajs, tgt_trajs)
-                batch_ade = batch_ade.mean()
+                batch_ade = batch_ade.sum()
 
                 # FDE
                 batch_fde = FDE(gen_trajs, tgt_trajs)
-                batch_fde = batch_fde.mean()
+                batch_fde = batch_fde.sum()
+
+            print("Working on train batch {:d}/{:d}... batch_loss: {:.2f}, qloss: {:.2f}, ploss: {:.2f}, ade: {:.2f}, fde: {:.2f}".format(b+1, len(self.train_loader), batch_loss.item(), batch_qloss, batch_ploss, batch_ade.item() / batch_size, batch_fde.item() / batch_size), end='\r')
 
             epoch_loss += batch_loss.item()
             epoch_ade += batch_ade.item()
             epoch_fde += batch_fde.item()
             epoch_agents += len(tgt_lens)
-
-            datatime_start = time.time()
 
         epoch_loss /= (b+1)
         epoch_ade /= epoch_agents
@@ -268,13 +266,13 @@ class ModelTrainer:
                 src_trajs = src_trajs.to(self.device, non_blocking=True)
                 src_lens = src_lens.to(self.device, non_blocking=True)
                 tgt_trajs = tgt_trajs.to(self.device, non_blocking=True)
-                decode_rel_pos = decode_rel_pos.to(self.device, non_blocking=True)
+                decode_start_vel = decode_start_vel.to(self.device, non_blocking=True)
                 decode_start_pos = decode_start_pos.to(self.device, non_blocking=True)
 
                 # Generate latent state z
-                z = torch.normal(mean=0.0, std=1.0, size=(30, batch_size, 2)).to(self.device)
+                z = torch.normal(mean=0.0, std=1.0, size=(batch_size, 30*2)).to(self.device)
                 # Initial GRU state
-                h_0 = torch.zeros((1, batch_size, 150)).to(self.device)
+                h_0 = torch.zeros((batch_size, 150)).to(self.device)
 
                 gen_trajs, mu, sigma  = self.model(z, h_0, src_trajs, src_lens, decode_start_vel, decode_start_pos, scene_images)
 
@@ -284,10 +282,12 @@ class ModelTrainer:
                 ploss = ploss.mean(dim=1) # [32]
 
                 # Normalizing Flow (q loss)
-                gen_trajs_bt = gen_trajs.reshape((-1, 2)) # 960 X 2
+                tgt_trajs_bt = tgt_trajs.reshape((-1, 2)) # 960 X 2
                 mu_bt = mu.reshape((-1, 2)) # 960 X 2
 
-                traj_mu = (gen_trajs_bt - mu_bt).unsqueeze(2) # 960 X 2 X 1
+                perterb_traj_bt = torch.normal(mean=0.0, std=0.001, size=tgt_trajs_bt.shape).to(self.device)
+
+                traj_mu = (tgt_trajs_bt - mu_bt - perterb_traj_bt).unsqueeze(2) # 960 X 2 X 1
                 sigma_bt = sigma.reshape((-1, 2, 2)) # 960 X 2 X 2
 
                 z_, _ = torch.solve(traj_mu, sigma_bt) # [960 X 2 X 1]
@@ -301,17 +301,14 @@ class ModelTrainer:
 
                 log_qpi = log_q0 - torch.log(det_sigma).sum(dim=1) # [32]
 
-                # batch_loss = 0.0
-                batch_ade, batch_fde = 0.0, 0.0
-                batch_loss = (-log_qpi + 0.0001 * ploss).mean()
+                batch_loss = (-log_qpi + self.beta * ploss).mean()
 
                 # ADE
-                batch_ade += ADE(gen_trajs, tgt_trajs)
+                batch_ade = ADE(gen_trajs, tgt_trajs)
+                batch_ade = batch_ade.sum()
                 # FDE
-                batch_fde += FDE(gen_trajs, tgt_trajs)
-
-                batch_ade = batch_ade.mean()
-                batch_fde = batch_fde.mean()
+                batch_fde = FDE(gen_trajs, tgt_trajs)
+                batch_fde = batch_fde.sum()
 
                 epoch_loss += batch_loss.item()
                 epoch_ade += batch_ade.item()

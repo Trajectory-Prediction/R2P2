@@ -94,26 +94,11 @@ class R2P2_RNN(R2P2_CNN):
         self.dynamic_decoder = dynamic_decoder
 
     def forward(self, z, h_0, src_trajs, src_lens, decode_start_vel, decode_start_pos, scene_images):
-        
-        scenetime_start = time.time()
-
         scene_encoding, _ = self.encode_scene(scene_images)
-        
-        scenetime = time.time() - scenetime_start
-
-        enctime_start = time.time()
 
         src_trajs = src_trajs.transpose(1, 0) # Convert to (Time X Batch X Dim)
         context_encoding, _ = self.context_encoder(src_trajs, scene_encoding)
 
-        enctime = time.time() - enctime_start
-
-        dectime_start = time.time()
-
         x, mu, sigma = self.dynamic_decoder(z, h_0, context_encoding, decode_start_vel, decode_start_pos)
-        
-        dectime = time.time() - dectime_start
-
-        # print("scenetime: {:.2f}, enctime: {:.2f}, dectime: {:.2f}".format(scenetime, enctime, dectime))
 
         return x, mu, sigma

@@ -11,6 +11,7 @@ from dataset import ArgoverseDataset
 from model_utils import ContextEncoder, DynamicDecoder
 from utils import ModelTrainer
 
+import pdb
 
 def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -44,6 +45,7 @@ def main(args):
 
     # Send model to Device:
     model = model.to(device)
+
     # if args.gpu_devices:
     #     model = nn.DataParallel(model, device_ids=eval(args.gpu_devices))
 
